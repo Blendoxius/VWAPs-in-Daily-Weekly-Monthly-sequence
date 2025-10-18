@@ -1,0 +1,298 @@
+//@version=6
+indicator("VWAP Professional - Correct Calculation", overlay=true, max_lines_count=500)
+
+// ========================================
+// SETTINGS - TIMEZONE
+// ========================================
+timezone_offset = input.int(0, "Timezone Offset (Hours from UTC)", minval=-12, maxval=14)
+
+// ========================================
+// SETTINGS - HISTORY
+// ========================================
+input_group_history = "═══ Historical Sessions ═══"
+show_history = input.bool(true, "Show Historical VWAPs (Frozen)?", group=input_group_history)
+max_daily_history = input.int(10, "Max Daily Sessions to Keep", minval=1, maxval=50, group=input_group_history)
+max_weekly_history = input.int(5, "Max Weekly Sessions to Keep", minval=1, maxval=20, group=input_group_history)
+max_monthly_history = input.int(3, "Max Monthly Sessions to Keep", minval=1, maxval=12, group=input_group_history)
+
+// ========================================
+// SETTINGS - SOURCE
+// ========================================
+src = input.source(hlc3, "Source")
+
+// ========================================
+// SETTINGS - ANCHORED VWAP
+// ========================================
+input_group_anchored = "═══ Anchored VWAP ═══"
+show_daily = input.bool(true, "Daily VWAP", group=input_group_anchored)
+daily_color = input.color(color.new(#FF0000, 0), "Daily Color", group=input_group_anchored)
+daily_width = input.int(2, "Daily Width", minval=1, maxval=5, group=input_group_anchored)
+
+show_weekly = input.bool(true, "Weekly VWAP", group=input_group_anchored)
+weekly_color = input.color(color.new(#00FF00, 0), "Weekly Color", group=input_group_anchored)
+weekly_width = input.int(2, "Weekly Width", minval=1, maxval=5, group=input_group_anchored)
+
+show_monthly = input.bool(true, "Monthly VWAP", group=input_group_anchored)
+monthly_color = input.color(color.new(#FF6D00, 0), "Monthly Color", group=input_group_anchored)
+monthly_width = input.int(2, "Monthly Width", minval=1, maxval=5, group=input_group_anchored)
+
+// ========================================
+// SETTINGS - ROLLING VWAP
+// ========================================
+input_group_rolling = "═══ Rolling VWAP ═══"
+show_rolling = input.bool(false, "Rolling VWAP", group=input_group_rolling)
+rolling_period = input.int(20, "Rolling Period (Bars)", minval=1, maxval=500, group=input_group_rolling)
+rolling_color = input.color(color.new(#FFEB3B, 0), "Rolling Color", group=input_group_rolling)
+rolling_width = input.int(2, "Rolling Width", minval=1, maxval=5, group=input_group_rolling)
+
+// ========================================
+// SETTINGS - STANDARD DEVIATION BANDS
+// ========================================
+input_group_bands = "═══ Standard Deviation Bands ═══"
+show_bands = input.bool(true, "Show StdDev Bands?", group=input_group_bands)
+bands_source = input.string("Daily", "Bands Source VWAP", options=["Daily", "Weekly", "Monthly", "Rolling"], group=input_group_bands)
+stdev_period = input.int(20, "StdDev Period", minval=1, maxval=200, group=input_group_bands)
+
+show_band1 = input.bool(true, "±1σ Band", group=input_group_bands)
+show_band2 = input.bool(true, "±2σ Band", group=input_group_bands)
+show_band3 = input.bool(false, "±3σ Band", group=input_group_bands)
+
+fill_band1 = input.bool(true, "Fill ±1σ", group=input_group_bands)
+fill_band2 = input.bool(true, "Fill ±2σ", group=input_group_bands)
+fill_band3 = input.bool(false, "Fill ±3σ", group=input_group_bands)
+
+band1_color = input.color(color.new(color.gray, 85), "±1σ Color", group=input_group_bands)
+band2_color = input.color(color.new(color.orange, 85), "±2σ Color", group=input_group_bands)
+band3_color = input.color(color.new(color.aqua, 85), "±3σ Color", group=input_group_bands)
+
+// ========================================
+// SETTINGS - SESSION MARKERS
+// ========================================
+input_group_markers = "═══ Session Markers ═══"
+show_session_lines = input.bool(true, "Show Session Start Lines?", group=input_group_markers)
+show_labels = input.bool(true, "Show Session Labels?", group=input_group_markers)
+
+// ========================================
+// TIMEZONE ADJUSTED TIME
+// ========================================
+
+int tz_ms = timezone_offset * 60 * 60 * 1000
+int adjusted_time = time + tz_ms
+
+int adj_day = dayofmonth(adjusted_time)
+int adj_week = weekofyear(adjusted_time)
+int adj_month = month(adjusted_time)
+
+// ========================================
+// SESSION DETECTION
+// ========================================
+
+bool is_new_day = ta.change(adj_day) != 0
+bool is_new_week = ta.change(adj_week) != 0
+bool is_new_month = ta.change(adj_month) != 0
+
+// ========================================
+// STORE HISTORICAL VWAP VALUES PER BAR
+// ========================================
+
+type VWAPBar
+    int bar_time
+    float vwap_value
+
+type VWAPPeriod
+    int start_time
+    int end_time
+    array<VWAPBar> bars
+
+var array<VWAPPeriod> daily_periods = array.new<VWAPPeriod>()
+var array<VWAPPeriod> weekly_periods = array.new<VWAPPeriod>()
+var array<VWAPPeriod> monthly_periods = array.new<VWAPPeriod>()
+
+var array<VWAPBar> current_daily_bars = array.new<VWAPBar>()
+var array<VWAPBar> current_weekly_bars = array.new<VWAPBar>()
+var array<VWAPBar> current_monthly_bars = array.new<VWAPBar>()
+
+// ========================================
+// DAILY VWAP CALCULATION
+// ========================================
+
+var float daily_vwap_sum = 0.0
+var float daily_vol_sum = 0.0
+var int daily_start_time = time
+
+if is_new_day
+    // Save previous day with all bars
+    if not barstate.isfirst and array.size(current_daily_bars) > 0
+        VWAPPeriod prev_period = VWAPPeriod.new(daily_start_time, time[1], current_daily_bars)
+        array.unshift(daily_periods, prev_period)
+        
+        while array.size(daily_periods) > max_daily_history
+            array.pop(daily_periods)
+    
+    // Reset
+    daily_vwap_sum := 0.0
+    daily_vol_sum := 0.0
+    daily_start_time := time
+    current_daily_bars := array.new<VWAPBar>()
+
+daily_vwap_sum += src * volume
+daily_vol_sum += volume
+float daily_vwap = daily_vol_sum > 0 ? daily_vwap_sum / daily_vol_sum : src
+
+// Store current bar's VWAP
+array.push(current_daily_bars, VWAPBar.new(time, daily_vwap))
+
+// ========================================
+// WEEKLY VWAP CALCULATION
+// ========================================
+
+var float weekly_vwap_sum = 0.0
+var float weekly_vol_sum = 0.0
+var int weekly_start_time = time
+
+if is_new_week
+    if not barstate.isfirst and array.size(current_weekly_bars) > 0
+        VWAPPeriod prev_period = VWAPPeriod.new(weekly_start_time, time[1], current_weekly_bars)
+        array.unshift(weekly_periods, prev_period)
+        
+        while array.size(weekly_periods) > max_weekly_history
+            array.pop(weekly_periods)
+    
+    weekly_vwap_sum := 0.0
+    weekly_vol_sum := 0.0
+    weekly_start_time := time
+    current_weekly_bars := array.new<VWAPBar>()
+
+weekly_vwap_sum += src * volume
+weekly_vol_sum += volume
+float weekly_vwap = weekly_vol_sum > 0 ? weekly_vwap_sum / weekly_vol_sum : src
+
+array.push(current_weekly_bars, VWAPBar.new(time, weekly_vwap))
+
+// ========================================
+// MONTHLY VWAP CALCULATION
+// ========================================
+
+var float monthly_vwap_sum = 0.0
+var float monthly_vol_sum = 0.0
+var int monthly_start_time = time
+
+if is_new_month
+    if not barstate.isfirst and array.size(current_monthly_bars) > 0
+        VWAPPeriod prev_period = VWAPPeriod.new(monthly_start_time, time[1], current_monthly_bars)
+        array.unshift(monthly_periods, prev_period)
+        
+        while array.size(monthly_periods) > max_monthly_history
+            array.pop(monthly_periods)
+    
+    monthly_vwap_sum := 0.0
+    monthly_vol_sum := 0.0
+    monthly_start_time := time
+    current_monthly_bars := array.new<VWAPBar>()
+
+monthly_vwap_sum += src * volume
+monthly_vol_sum += volume
+float monthly_vwap = monthly_vol_sum > 0 ? monthly_vwap_sum / monthly_vol_sum : src
+
+array.push(current_monthly_bars, VWAPBar.new(time, monthly_vwap))
+
+// ========================================
+// ROLLING VWAP
+// ========================================
+
+rolling_vwap(int len) =>
+    float sum_pv = 0.0
+    float sum_v = 0.0
+    
+    for i = 0 to math.min(len - 1, bar_index)
+        sum_pv += src[i] * volume[i]
+        sum_v += volume[i]
+    
+    sum_v > 0 ? sum_pv / sum_v : src
+
+float rolling_vwap_value = rolling_vwap(rolling_period)
+
+// ========================================
+// DRAW HISTORICAL VWAPS (AS LINES per bar)
+// ========================================
+
+if barstate.islast and show_history
+    // Daily
+    if show_daily
+        for i = 0 to array.size(daily_periods) - 1
+            VWAPPeriod period = array.get(daily_periods, i)
+            if array.size(period.bars) > 1
+                for j = 0 to array.size(period.bars) - 2
+                    VWAPBar bar1 = array.get(period.bars, j)
+                    VWAPBar bar2 = array.get(period.bars, j + 1)
+                    line.new(bar1.bar_time, bar1.vwap_value, bar2.bar_time, bar2.vwap_value, xloc=xloc.bar_time, color=color.new(daily_color, 20), width=daily_width)
+    
+    // Weekly
+    if show_weekly
+        for i = 0 to array.size(weekly_periods) - 1
+            VWAPPeriod period = array.get(weekly_periods, i)
+            if array.size(period.bars) > 1
+                for j = 0 to array.size(period.bars) - 2
+                    VWAPBar bar1 = array.get(period.bars, j)
+                    VWAPBar bar2 = array.get(period.bars, j + 1)
+                    line.new(bar1.bar_time, bar1.vwap_value, bar2.bar_time, bar2.vwap_value, xloc=xloc.bar_time, color=color.new(weekly_color, 20), width=weekly_width)
+    
+    // Monthly
+    if show_monthly
+        for i = 0 to array.size(monthly_periods) - 1
+            VWAPPeriod period = array.get(monthly_periods, i)
+            if array.size(period.bars) > 1
+                for j = 0 to array.size(period.bars) - 2
+                    VWAPBar bar1 = array.get(period.bars, j)
+                    VWAPBar bar2 = array.get(period.bars, j + 1)
+                    line.new(bar1.bar_time, bar1.vwap_value, bar2.bar_time, bar2.vwap_value, xloc=xloc.bar_time, color=color.new(monthly_color, 20), width=monthly_width)
+
+// ========================================
+// PLOT CURRENT SESSION (with breaks)
+// ========================================
+
+float daily_plot = is_new_day ? na : daily_vwap
+float weekly_plot = is_new_week ? na : weekly_vwap
+float monthly_plot = is_new_month ? na : monthly_vwap
+
+plot(show_daily ? daily_plot : na, title="Daily VWAP", color=daily_color, linewidth=daily_width)
+plot(show_weekly ? weekly_plot : na, title="Weekly VWAP", color=weekly_color, linewidth=weekly_width)
+plot(show_monthly ? monthly_plot : na, title="Monthly VWAP", color=monthly_color, linewidth=monthly_width)
+plot(show_rolling ? rolling_vwap_value : na, title="Rolling VWAP", color=rolling_color, linewidth=rolling_width)
+
+// ========================================
+// BANDS
+// ========================================
+
+float base_vwap = bands_source == "Daily" ? daily_vwap : bands_source == "Weekly" ? weekly_vwap : bands_source == "Monthly" ? monthly_vwap : rolling_vwap_value
+float dev = ta.stdev(close, stdev_period)
+
+plot1u = plot(show_bands and show_band1 ? base_vwap + dev * 1 : na, color=color.gray, display=display.none)
+plot1l = plot(show_bands and show_band1 ? base_vwap - dev * 1 : na, color=color.gray, display=display.none)
+plot2u = plot(show_bands and show_band2 ? base_vwap + dev * 2 : na, color=color.orange, display=display.none)
+plot2l = plot(show_bands and show_band2 ? base_vwap - dev * 2 : na, color=color.orange, display=display.none)
+plot3u = plot(show_bands and show_band3 ? base_vwap + dev * 3 : na, color=color.aqua, display=display.none)
+plot3l = plot(show_bands and show_band3 ? base_vwap - dev * 3 : na, color=color.aqua, display=display.none)
+
+fill(plot1u, plot1l, color=fill_band1 ? band1_color : na)
+fill(plot2u, plot2l, color=fill_band2 ? band2_color : na)
+fill(plot3u, plot3l, color=fill_band3 ? band3_color : na)
+
+// ========================================
+// SESSION MARKERS
+// ========================================
+
+if is_new_day and show_session_lines
+    line.new(time, low, time, high, xloc=xloc.bar_time, color=color.new(color.white, 70), width=1, style=line.style_dotted, extend=extend.both)
+    if show_labels
+        label.new(time, high, str.format("Day (UTC{0})", timezone_offset >= 0 ? "+" + str.tostring(timezone_offset) : str.tostring(timezone_offset)), xloc=xloc.bar_time, color=color.new(color.white, 70), textcolor=color.white, style=label.style_label_down, size=size.small)
+
+if is_new_week and show_session_lines
+    line.new(time, low, time, high, xloc=xloc.bar_time, color=color.new(color.green, 50), width=2, style=line.style_dotted, extend=extend.both)
+    if show_labels
+        label.new(time, high * 1.01, "WEEK", xloc=xloc.bar_time, color=color.new(color.green, 70), textcolor=color.green, style=label.style_label_down, size=size.normal)
+
+if is_new_month and show_session_lines
+    line.new(time, low, time, high, xloc=xloc.bar_time, color=color.new(color.orange, 50), width=2, style=line.style_dotted, extend=extend.both)
+    if show_labels
+        label.new(time, high * 1.02, "MONTH", xloc=xloc.bar_time, color=color.new(color.orange, 70), textcolor=color.orange, style=label.style_label_down, size=size.normal)
