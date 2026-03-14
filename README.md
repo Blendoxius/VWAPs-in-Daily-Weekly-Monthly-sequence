@@ -2,16 +2,21 @@
 
 This repository contains a TradingView **Pine Script v6** indicator that plots **anchored VWAPs** that reset on **Daily**, **Weekly**, and **Monthly** boundaries, plus an optional **Rolling VWAP**.
 
-The script is intended to provide a “professional” VWAP calculation using the classic formula:
+The script uses the classic VWAP formula:
 
 - **VWAP = Σ(price × volume) / Σ(volume)**
 
 It also supports:
-
 - Displaying **historical (frozen) VWAPs** for a configurable number of past daily/weekly/monthly sessions
 - Optional **standard deviation bands** (±1σ, ±2σ, ±3σ) around a selected VWAP source
 - **Session start markers** and labels for day/week/month changes
-- A **timezone offset** input that shifts the calendar boundary detection (useful when you want session resets aligned to your local timezone)
+- A **timezone offset** input to shift the period boundary detection
+
+## Screenshot
+
+> Put the image file in the repository root as `image.png`.
+
+![Indicator Screenshot](image.png)
 
 ## Files
 
@@ -20,7 +25,7 @@ It also supports:
 ## How it works (high level)
 
 1. **Timezone-adjusted boundaries**
-   - The script offsets `time` by `Timezone Offset (Hours from UTC)` and then derives adjusted day/week/month values.
+   - The script offsets `time` by `Timezone Offset (Hours from UTC)` and derives adjusted day/week/month values.
    - A new session is detected when the adjusted day/week/month changes.
 
 2. **Anchored VWAPs (Daily / Weekly / Monthly)**
@@ -49,7 +54,3 @@ It also supports:
 - **Performance:** drawing many historical sessions creates many `line.new()` objects. If your chart is slow, reduce the history limits.
 - **Bands:** bands are based on the standard deviation of `close`, not of VWAP.
 - **File extension:** the script is stored as `.txt` in this repo; TradingView expects it pasted into the Pine Editor.
-
-## License
-
-No license file is currently included in this repository. If you want others to reuse/modify it, consider adding an open-source license (e.g., MIT).
